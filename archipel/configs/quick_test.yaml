@@ -1,0 +1,24 @@
+model:
+  num_islands: 2
+  input_dim: 32
+  hidden_dim: 16
+  ocean_dim: 8
+  top_k: 1
+  max_islands: 4
+  min_islands: 1
+  coherence_variance_threshold: 0.5
+
+training:
+  lr: 0.001
+  epochs: 2
+  batch_size: 8
+  log_every: 5
+  save_every: 10
+  checkpoint_dir: checkpoints
+  device: cpu
+
+data:
+  num_samples: 100
+  input_dim: 32
+  num_classes: 3
+  signal_strength: 0.8

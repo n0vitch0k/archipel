@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "archipel"
+version = "0.1.0"
+description = "Archipel Phase 1: Minimal Archipel PyTorch Implementation"
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0.0",
+    "numpy>=2.0.0",
+    "PyYAML>=6.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
