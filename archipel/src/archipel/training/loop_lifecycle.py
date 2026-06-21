@@ -368,14 +368,19 @@ class ArchipelPhase2(ArchipelPhase1):
         # Expand ocean space (resize all island-dependent buffers)
         self.ocean.space.resize(self.num_islands)
 
-        # Expand router thresholds (no_grad to avoid leaf Variable in-place issue)
+        # Resize router for new island count
         old_num = self.router.num_islands
-        self.router.num_islands = self.num_islands
-        old_thresholds = self.router.island_thresholds
-        with torch.no_grad():
-            new_thresholds = torch.zeros(self.num_islands, device=old_thresholds.device)
-            new_thresholds[:old_num] = old_thresholds.data.clone()
-        self.router.island_thresholds = nn.Parameter(new_thresholds)
+        # KuramotoIslandRouter: full resize via router.resize()
+        # HyperNetworkRouter: manual island_thresholds resize (backward compat)
+        if hasattr(self.router, "resize"):
+            self.router.resize(self.num_islands)
+        else:
+            self.router.num_islands = self.num_islands
+            old_thresholds = self.router.island_thresholds
+            with torch.no_grad():
+                new_thresholds = torch.zeros(self.num_islands, device=old_thresholds.device)
+                new_thresholds[:old_num] = old_thresholds.data.clone()
+            self.router.island_thresholds = nn.Parameter(new_thresholds)
 
         old_bias = self.island_output_bias
         with torch.no_grad():
@@ -455,17 +460,22 @@ class ArchipelPhase2(ArchipelPhase1):
         # Resize ocean space buffers for the new island count
         self.ocean.space.resize(self.num_islands)
 
-        # Update router (no_grad to avoid leaf Variable in-place issue)
-        self.router.num_islands = self.num_islands
-        with torch.no_grad():
-            new_thresholds = torch.zeros(self.num_islands, device=self.router.island_thresholds.device)
-            # Copy all except the removed island
-            kept_thresholds = [i for i in range(len(self.router.island_thresholds)) if i != island_id]
-            kept_thresholds = kept_thresholds[: self.num_islands]
-            for new_i, old_i in enumerate(kept_thresholds):
-                if old_i < len(self.router.island_thresholds):
-                    new_thresholds[new_i] = self.router.island_thresholds[old_i].detach().clone()
-        self.router.island_thresholds = nn.Parameter(new_thresholds)
+        # Resize router for new island count
+        # KuramotoIslandRouter: full resize via router.resize()
+        # HyperNetworkRouter: manual island_thresholds resize (backward compat)
+        if hasattr(self.router, "resize"):
+            self.router.resize(self.num_islands)
+        else:
+            self.router.num_islands = self.num_islands
+            with torch.no_grad():
+                new_thresholds = torch.zeros(self.num_islands, device=self.router.island_thresholds.device)
+                # Copy all except the removed island
+                kept_thresholds = [i for i in range(len(self.router.island_thresholds)) if i != island_id]
+                kept_thresholds = kept_thresholds[: self.num_islands]
+                for new_i, old_i in enumerate(kept_thresholds):
+                    if old_i < len(self.router.island_thresholds):
+                        new_thresholds[new_i] = self.router.island_thresholds[old_i].detach().clone()
+            self.router.island_thresholds = nn.Parameter(new_thresholds)
 
         old_bias = self.island_output_bias
         with torch.no_grad():

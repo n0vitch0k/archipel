@@ -6,6 +6,8 @@ Usage:
     modal run modal_validate.py --mnist            # MNIST + validation uniquement
     modal run modal_validate.py --long             # Run 50 epochs
     modal run modal_validate.py --multi-long       # 3×50 epochs (seeds 42, 123, 256)
+    modal run modal_validate.py --kuramoto         # Cosine vs Kuramoto comparison (5 epochs)
+    modal run modal_validate.py --multi-kuramoto   # 3 seeds × 2 modes × 50 epochs
     modal run modal_validate.py --all              # Tout
 """
 
@@ -29,10 +31,29 @@ image = (
 
 @app.local_entrypoint()
 def main(quick: bool = False, mnist: bool = False, all: bool = False, long: bool = False,
-         multi_long: bool = False, seed: int = 42):
+         multi_long: bool = False, kuramoto: bool = False, multi_kuramoto: bool = False,
+         seed: int = 42):
     """Run Archipel validation suite on Modal cloud."""
 
-    if multi_long:
+    if multi_kuramoto:
+        suite = "3 seeds × 2 modes × 50 epochs (Kuramoto vs Cosine)"
+        seeds = [42, 123, 256]
+        print(f"🚀 Archipel Validation — {suite}")
+        print(f"   Running in cloud (CPU instance)…\n")
+        for s in seeds:
+            for mode in ["cosine", "kuramoto"]:
+                print(f"\n{'='*60}")
+                print(f"  ▶ MNIST 50 epochs — seed={s} — mode={mode}")
+                print(f"{'='*60}")
+                result = run_validation.remote(modes=[f"mnist50:{mode}"], seed=s)
+                print(result["summary"])
+        print("\n✅ ALL 6 KURAMOTO COMPARISON RUNS COMPLETED")
+        return
+
+    if kuramoto:
+        suite = "Cosine vs Kuramoto comparison (5 epochs)"
+        modes = ["mnist_compare"]
+    elif multi_long:
         suite = "3×50 epochs multi-seed (42, 123, 256)"
         seeds = [42, 123, 256]
         print(f"🚀 Archipel Validation — {suite}")
@@ -166,13 +187,23 @@ def run_validation(modes: list, seed: int) -> dict:
             timeout=600
         )
 
-    # ── Step 2b: MNIST long (50 epochs) ──
-    if "mnist50" in modes:
-        run_step(
-            f"MNIST 50 epochs (batch=64, seed={seed})",
-            [sys.executable, "test_mnist_quick.py", "--epochs", "50", "--batch-size", "64"],
-            timeout=1800
-        )
+    # ── Step 2b: MNIST long (50 epochs) with optional routing mode ──
+    if any(m.startswith("mnist50") for m in modes):
+        for m in modes:
+            if not m.startswith("mnist50"):
+                continue
+            routing_mode = m.split(":")[1] if ":" in m else "cosine"
+            label_suffix = f" (mode={routing_mode})" if routing_mode != "cosine" else ""
+            cmd = [sys.executable, "validate_kuramoto_compare.py",
+                   "--epochs", "50", "--batch-size", "64",
+                   "--seeds", str(seed)]
+            if routing_mode == "cosine":
+                cmd.append("--no-kuramoto")
+            run_step(
+                f"MNIST 50 epochs (batch=64, seed={seed}){label_suffix}",
+                cmd,
+                timeout=1800
+            )
 
     # ── Step 3: Validation N1.4/1.5 ──
     if "validate" in modes:
@@ -196,6 +227,16 @@ def run_validation(modes: list, seed: int) -> dict:
                  "--epochs", "3", "--batch-size", "128"],
                 timeout=600
             )
+
+    # ── Step 5: Kuramoto comparison (5 epochs, 3 seeds, both modes) ──
+    if "mnist_compare" in modes:
+        run_step(
+            "Kuramoto vs Cosine comparison (5 epochs, seeds 42,123,256)",
+            [sys.executable, "validate_kuramoto_compare.py",
+             "--epochs", "5", "--batch-size", "64",
+             "--seeds", "42", "123", "256", "--data-size", "10000"],
+            timeout=1200
+        )
 
     # ── Summary ──
     summary_lines = [
