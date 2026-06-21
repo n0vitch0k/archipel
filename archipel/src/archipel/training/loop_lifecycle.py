@@ -16,6 +16,7 @@ from ..ocean.ocean import Ocean, OceanSpace
 from ..current.router import HyperNetworkRouter, HyperNetworkGenerator, init_island_states
 from ..current.courant import Courant
 from ..current.topk_curriculum import TopKCurriculum, RoutingUsageTracker
+from ..current.kuramoto import KuramotoIslandRouter
 from .loop import (
     ArchipelPhase1,
     compute_coherence_loss,
@@ -124,6 +125,7 @@ class ArchipelPhase2(ArchipelPhase1):
         death_window: int = 100,
         birth_cooldown: int = 50,
         death_cooldown: int = 50,
+        **kwargs: Any,
     ) -> None:
         """Initialize Phase 2 Archipel with dynamic islands.
 
@@ -195,6 +197,16 @@ class ArchipelPhase2(ArchipelPhase1):
         self.island_output_bias = nn.Parameter(torch.randn(max_islands, 10) * 0.5)
 
         self.specialization._num_active_islands = num_islands
+        # Absorb extra kwargs for backward compat (e.g. routing_mode from Phase3)
+        _ = kwargs
+
+    def post_training_step(self) -> None:
+        """Hook called after each optimizer step in the training loop.
+
+        ArchipelPhase2: no-op. ArchipelPhase3 overrides this to call
+        Kuramoto phase updates.
+        """
+        pass
 
     def get_config(self) -> Dict[str, Any]:
         """Return the constructor configuration needed to recreate the model.
@@ -261,6 +273,18 @@ class ArchipelPhase2(ArchipelPhase1):
 
         config = dict(checkpoint["config"])
         model = cls(**config)
+
+        # Resize island_output_bias to match checkpoint state_dict size.
+        # After spawn/kill the bias is resized in-memory, so the checkpoint
+        # may have fewer rows than max_islands.  We must match before
+        # load_state_dict.
+        with torch.no_grad():
+            ckpt_bias_shape = checkpoint["state_dict"]["island_output_bias"].size(0)
+            if ckpt_bias_shape < model.island_output_bias.size(0):
+                model.island_output_bias = nn.Parameter(
+                    model.island_output_bias[:ckpt_bias_shape].clone()
+                )
+
         model.load_state_dict(checkpoint["state_dict"])
 
         ocean_state = checkpoint.get("ocean_space", {})
@@ -553,6 +577,165 @@ class ArchipelPhase2(ArchipelPhase1):
         }
 
 
+class ArchipelPhase3(ArchipelPhase2):
+    """Phase 3 Archipel model: Kuramoto routing + Phase 2 lifecycle.
+
+    Extends Phase 2 with optional Kuramoto oscillator routing.  When
+    ``routing_mode='kuramoto'`` the cosine-similarity router
+    (:class:`HyperNetworkRouter`) is replaced by a coupled-oscillator
+    router (:class:`KuramotoIslandRouter`).  Ridge phases evolve after
+    each training step via ``post_training_step()``.
+
+    When ``routing_mode='cosine'`` (the default) the model behaves
+    identically to :class:`ArchipelPhase2`.
+    """
+
+    def __init__(
+        self,
+        num_islands: int = 4,
+        input_dim: int = 128,
+        hidden_dim: int = 64,
+        ocean_dim: int = 32,
+        top_k: int = 2,
+        max_islands: int = 8,
+        min_islands: int = 2,
+        routing_mode: str = "cosine",
+        # Lifecycle params
+        coherence_variance_threshold: float = 0.5,
+        gradient_norm_threshold: float = 1e-5,
+        death_window: int = 100,
+        birth_cooldown: int = 50,
+        death_cooldown: int = 50,
+        # Kuramoto params
+        kuramoto_dt: float = 0.1,
+        kuramoto_coupling_init: float = 1.0,
+    ) -> None:
+        self.routing_mode = routing_mode
+        self._kuramoto_dt = kuramoto_dt
+        self._kuramoto_coupling_init = kuramoto_coupling_init
+
+        super().__init__(
+            num_islands=num_islands,
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            ocean_dim=ocean_dim,
+            top_k=top_k,
+            max_islands=max_islands,
+            min_islands=min_islands,
+            coherence_variance_threshold=coherence_variance_threshold,
+            gradient_norm_threshold=gradient_norm_threshold,
+            death_window=death_window,
+            birth_cooldown=birth_cooldown,
+            death_cooldown=death_cooldown,
+        )
+
+        # Replace router if Kuramoto mode
+        if routing_mode == "kuramoto":
+            self.router = KuramotoIslandRouter(
+                embedding_dim=ocean_dim,
+                num_islands=num_islands,
+                top_k=top_k,
+                dt=kuramoto_dt,
+                coupling_init=kuramoto_coupling_init,
+            )
+
+    def post_training_step(self) -> None:
+        """Advance Kuramoto phases after each optimizer step."""
+        if self.routing_mode == "kuramoto":
+            self.router.update_phases()
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config["routing_mode"] = self.routing_mode
+        config["kuramoto_dt"] = self._kuramoto_dt
+        config["kuramoto_coupling_init"] = self._kuramoto_coupling_init
+        return config
+
+    @classmethod
+    def load_checkpoint(cls, path: Any, map_location: Any = "cpu") -> "ArchipelPhase3":
+        """Load a Phase 3 checkpoint.
+
+        Handles both Phase 2 and Phase 3 checkpoints transparently.
+        Phase 2 checkpoints are loaded into an ArchipelPhase3 instance
+        with ``routing_mode='cosine'`` (identical behaviour).
+        """
+        checkpoint = torch.load(path, map_location=map_location, weights_only=False)
+        if not isinstance(checkpoint, dict) or "config" not in checkpoint:
+            raise ValueError("Checkpoint invalide: champ 'config' absent")
+
+        config = dict(checkpoint["config"])
+        # Normalise for backward compat — older Phase 2 checkpoints
+        # won't have routing_mode; default to cosine.
+        if "routing_mode" not in config:
+            config["routing_mode"] = "cosine"
+        if "kuramoto_dt" not in config:
+            config["kuramoto_dt"] = 0.1
+        if "kuramoto_coupling_init" not in config:
+            config["kuramoto_coupling_init"] = 1.0
+
+        model = cls(**config)
+
+        # Resize island_output_bias to match checkpoint state_dict size
+        with torch.no_grad():
+            ckpt_bias_shape = checkpoint["state_dict"]["island_output_bias"].size(0)
+            if ckpt_bias_shape < model.island_output_bias.size(0):
+                model.island_output_bias = nn.Parameter(
+                    model.island_output_bias[:ckpt_bias_shape].clone()
+                )
+
+        model.load_state_dict(checkpoint["state_dict"], strict=False)
+
+        # Restore ocean space
+        ocean_state = checkpoint.get("ocean_space", {})
+        if ocean_state:
+            model.ocean.space.resize(int(ocean_state["num_islands"]))
+            device = model.ocean.space.island_embeddings.device
+            with torch.no_grad():
+                model.ocean.space.island_embeddings.data.copy_(
+                    ocean_state["island_embeddings"].to(device)
+                )
+                model.ocean.space.interaction_counts.data.copy_(
+                    ocean_state["interaction_counts"].to(device)
+                )
+                model.ocean.space.proximity_matrix.data.copy_(
+                    ocean_state["proximity_matrix"].to(device)
+                )
+
+        # Restore specialization
+        spec_state = checkpoint.get("specialization", {})
+        if spec_state:
+            device = model.specialization.scores.device
+            scores = spec_state["scores"].to(device)
+            counts = spec_state["counts"].to(device)
+            model.specialization.register_buffer("scores", scores.clone())
+            model.specialization.register_buffer("counts", counts.clone())
+            model.specialization.num_islands = int(spec_state["num_islands"])
+            model.specialization.num_active_islands = int(
+                spec_state["num_active_islands"]
+            )
+            if "output_bias" in spec_state:
+                bias = spec_state["output_bias"].to(model.island_output_bias.device)
+                copy_rows = min(bias.size(0), model.island_output_bias.size(0))
+                with torch.no_grad():
+                    model.island_output_bias[:copy_rows, :bias.size(1)].copy_(
+                        bias[:copy_rows, :bias.size(1)]
+                    )
+
+        # Restore lifecycle runtime
+        lifecycle_runtime = checkpoint.get("lifecycle_runtime", {})
+        model.lifecycle._steps_since_birth = int(
+            lifecycle_runtime.get("steps_since_birth", 0)
+        )
+        model.lifecycle._steps_since_death = int(
+            lifecycle_runtime.get("steps_since_death", 0)
+        )
+        model.lifecycle._grad_history_idx = int(
+            lifecycle_runtime.get("grad_history_idx", 0)
+        )
+
+        return model
+
+
 
 def train_loop_lifecycle(
     model: ArchipelPhase2,
@@ -739,6 +922,9 @@ Tuple of (logs, updated_courant).
                     island_outputs=out_dict["island_outputs"].detach(),
                 )
 
+            # ─── Post-training step hook (Kuramoto phase update, etc.) ─
+            model.post_training_step()
+
             # ─── Lifecycle evaluation (POST-backward: no graph corruption) ───
             # 1. Compute coherence variance of active islands
             active_mask_v = routing_weights.sum(dim=0) > 0
@@ -885,6 +1071,12 @@ Tuple of (logs, updated_courant).
                 "spec_mean": spec_state["spec_mean"],
                 "spec_max": spec_state["spec_max"],
                 "spec_std": spec_state["spec_std"],
+                # Kuramoto sync metrics (if router provides them)
+                **(
+                    model.router.get_sync_metrics()
+                    if hasattr(model.router, "get_sync_metrics")
+                    else {}
+                ),
                 "qualitative_log": qualitative_log,
                 **lifecycle_state,
             }
