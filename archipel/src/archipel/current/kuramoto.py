@@ -74,12 +74,26 @@ class KuramotoIslandRouter(nn.Module):
             "omega", nn.Parameter(torch.randn(num_islands) * 0.1, requires_grad=True)
         )
 
-        # Global coupling strength K (scalar — uniform all-to-all coupling,
-        # the classic Kuramoto model).  Can be extended to a full matrix
-        # later (Option B/C in the plan).
+        # Coupling matrix K_ij (num_islands × num_islands) — learnable
+        # pairwise coupling strengths.  Stored in log-space: K_ij = softplus(K_raw).
+        # This guarantees non-negative coupling (no repulsive dynamics).
+        # The matrix is symmetric with zero diagonal, allowing cluster
+        # synchronisation to emerge (some pairs couple strongly, others weakly).
+        target_init = coupling_init / max(1, num_islands)
+        # Inverse of softplus: raw = log(exp(target) - 1)
+        K_raw_init_val = math.log(max(math.exp(target_init) - 1.0, 1e-8))
+        K_raw = torch.full((num_islands, num_islands), K_raw_init_val)
+        # Small noise breaks initial symmetry
+        noise = torch.randn(num_islands, num_islands) * 0.01
+        K_raw = K_raw + noise
+        K_raw = (K_raw + K_raw.T) / 2.0  # symmetrise
+        K_raw.fill_diagonal_(0)  # no self-coupling
+        # Clamp to avoid extreme values (nan from log(0))
+        K_raw = K_raw.clamp(min=-10.0, max=10.0)
         self.register_parameter(
-            "K", nn.Parameter(torch.tensor(coupling_init, dtype=torch.float32), requires_grad=True)
+            "K", nn.Parameter(K_raw, requires_grad=True)
         )
+        self._coupling_init = coupling_init  # stored for resize
 
         # ── Cascaded modulator (same role as in HyperNetworkRouter) ──────
         self.register_parameter(
@@ -142,8 +156,21 @@ class KuramotoIslandRouter(nn.Module):
                 new_omega = self.omega[:num_islands].detach().clone()
             self.omega = nn.Parameter(new_omega)
 
-            # ── K (scalar) — no resize needed, shared across all islands ──
-            # (If we later switch to a matrix, we'll resize here.)
+            # ── K (matrix) — reshape for new island count ────────────────
+            if num_islands > old_n:
+                # New rows/cols: initialise in log-space so that
+                # softplus(K_raw) ≈ avg effective coupling of existing pairs.
+                with torch.no_grad():
+                    K_eff = F.softplus(self.K.detach())
+                    avg_eff = K_eff.mean().item() if old_n > 1 else self._coupling_init / max(1, num_islands)
+                    # Inverse softplus: raw = log(exp(avg_eff) - 1)
+                    avg_raw = max(math.log(max(math.exp(avg_eff) - 1.0, 1e-8)), -10.0)
+                new_K = torch.full((num_islands, num_islands), avg_raw, device=device)
+                new_K.fill_diagonal_(0)
+                new_K[:old_n, :old_n] = self.K.detach()
+                self.K = nn.Parameter(new_K.clamp(min=-10.0, max=10.0))
+            elif num_islands < old_n:
+                self.K = nn.Parameter(self.K[:num_islands, :num_islands].detach().clone())
 
             # ── island_thresholds ──
             if num_islands > old_n:
@@ -213,13 +240,19 @@ class KuramotoIslandRouter(nn.Module):
         diff = theta.unsqueeze(0) - theta.unsqueeze(1)  # (N, N)
         diff = (diff + math.pi) % (2.0 * math.pi) - math.pi
 
-        # Coupling term: (K/N) · Σ_j sin(θ_j − θ_i) — classic Kuramoto
-        K_val = self.K.detach().item()
-        N = self.num_islands
-        coupling_sum = (K_val / N) * torch.sin(diff).sum(dim=1)  # (N,)
+        # Pairwise coupling: Σ_j K_ij · sin(θ_j − θ_i)  with matrix K_ij
+        K_raw = self.K.detach()  # (N, N)
+        # Numerically enforce symmetry (gradients can drift it)
+        K_raw = (K_raw + K_raw.T) / 2.0
+        # Ensure non-negative coupling: negative K_ij would be repulsive
+        # and destabilise the dynamics.  Softplus gives a smooth positive
+        # lower bound without discontinuities.
+        K_mat = F.softplus(K_raw)
+        sin_diff = torch.sin(diff)  # (N, N)
+        coupling = (K_mat * sin_diff).sum(dim=1)  # (N,)
 
         # Euler step
-        dtheta = self.omega.detach() + coupling_sum  # (N,)
+        dtheta = self.omega.detach() + coupling  # (N,)
         self.theta.data = (theta + dt * dtheta) % (2.0 * math.pi)
 
     # ── Input encoding  ─────────────────────────────────────────────────

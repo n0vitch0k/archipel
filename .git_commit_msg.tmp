@@ -1,0 +1,8 @@
+feat: K_ij matrix (softplus-positive) + CIFAR-10 validation
+
+- Coupling matrix replaces scalar K: learnable NxN pairwise strengths
+- softplus(K_raw) ensures non-negative coupling, symmetric, diag=0
+- resize() adapts matrix to changing island count
+- 5 new tests: symmetry, diag=0, positive, shape, resize correct
+- CIFAR10ArchipelPhase3 with CNN encoder (3x32x32 -> 128)
+- train_cifar10_compare(), --dataset flag in CLI

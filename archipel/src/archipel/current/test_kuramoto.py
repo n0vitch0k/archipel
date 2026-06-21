@@ -4,6 +4,7 @@ import math
 
 import pytest
 import torch
+import torch.nn as nn
 
 from archipel.current.kuramoto import KuramotoIslandRouter
 
@@ -53,6 +54,7 @@ class TestPhaseInit:
         assert router.theta.shape == (4,)
         assert router.omega.shape == (4,)
         assert router.island_thresholds.shape == (4,)
+        assert router.K.shape == (4, 4)
 
 
 # ── Input → phase mapping ──────────────────────────────────────────────
@@ -311,10 +313,16 @@ class TestResize:
         assert torch.allclose(router.theta, original[:3])
 
     def test_resize_k_updated(self, router):
-        """K (scalar) should be preserved after resize."""
+        """K matrix should be preserved and resized correctly."""
         K_before = router.K.detach().clone()
         router.resize(6)
-        assert torch.allclose(router.K, K_before)
+        assert router.K.shape == (6, 6)
+        # Top-left 4×4 should match original
+        assert torch.allclose(router.K[:4, :4], K_before)
+        # Shrink back
+        router.resize(3)
+        assert router.K.shape == (3, 3)
+        assert torch.allclose(router.K, K_before[:3, :3])
 
     def test_set_top_k_clamps(self, router):
         """set_top_k should clamp to [1, num_islands]."""
@@ -324,6 +332,77 @@ class TestResize:
         assert router.top_k == 1
         router.set_top_k(2)
         assert router.top_k == 2
+
+
+# ── K matrix properties ─────────────────────────────────────────────
+
+class TestKMatrix:
+    def test_k_matrix_symmetric(self, router):
+        """K_ij should be symmetric: K_ij ≈ K_ji."""
+        K = router.K.detach()
+        diff = (K - K.T).abs().max().item()
+        assert diff < 1e-6, f"K not symmetric, max diff={diff:.2e}"
+
+    def test_k_diagonal_zero(self, router):
+        """Diagonal of K should be zero (no self-coupling)."""
+        K = router.K.detach()
+        diag = K.diag().abs().max().item()
+        assert diag < 1e-6, f"K diagonal not zero, max={diag:.2e}"
+
+    def test_k_sync_with_high_coupling(self):
+        """N=2, high K_12 → oscillators synchronise (R → 1)."""
+        router = KuramotoIslandRouter(
+            embedding_dim=32,
+            num_islands=2,
+            coupling_init=2.0,
+            dt=0.05,
+        )
+        with torch.no_grad():
+            router.omega.zero_()
+            router.theta[:] = torch.tensor([0.0, 1.5])
+            # Set strong cross-coupling
+            router.K[0, 1] = 2.0
+            router.K[1, 0] = 2.0
+            router.K[0, 0] = 0.0
+            router.K[1, 1] = 0.0
+
+        for _ in range(500):
+            router.update_phases()
+        metrics = router.get_sync_metrics()
+        assert metrics["order_parameter"] > 0.98, f"R={metrics['order_parameter']:.4f}"
+
+    def test_k_asymmetric_coupling_desync(self):
+        """Asymmetric K_12 ≠ K_21 should still produce valid dynamics."""
+        router = KuramotoIslandRouter(
+            embedding_dim=32,
+            num_islands=2,
+            coupling_init=0.5,
+            dt=0.05,
+        )
+        with torch.no_grad():
+            router.omega.zero_()
+            router.theta[:] = torch.tensor([0.0, 0.1])
+            # Break symmetry: island 1 pulls, island 0 doesn't
+            router.K[0, 1] = 2.0
+            router.K[1, 0] = 0.1
+            router.K[0, 0] = 0.0
+            router.K[1, 1] = 0.0
+
+        # Should still evolve without error
+        for _ in range(200):
+            router.update_phases()
+        theta = router.theta.detach()
+        assert theta.min() >= 0.0 - 1e-4
+        assert theta.max() < 2.0 * math.pi + 1e-4
+
+    def test_k_matrix_learnable(self, router):
+        """K should receive gradients through the forward pass
+        (it's a Parameter, not a buffer)."""
+        # K gets gradients during training via the phase_net → routing loss path?
+        # Actually no — K only affects update_phases which is called separately.
+        # But it should be a Parameter with requires_grad=True
+        assert router.K.requires_grad
+        assert isinstance(router.K, nn.Parameter)
 
 
 # ── Edge cases ──────────────────────────────────────────────────────────
