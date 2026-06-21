@@ -1,9 +1,9 @@
 # Archipel — Plan de travail
 
-**Dernière mise à jour** : 2026-06-21  
+**Dernière mise à jour** : 2026-06-21  **20h**  
 **État** : Phase 2 STABLE (N1.0–N1.6) — Spécialisation fonctionnelle ✅  
-**Cloud** : Modal CI opérationnel  
-**Prochaine décision** : Phase 3 (Kuramoto) ou renforcement de la spécialisation
+**Phase 3 Sprint 1** : Routeur Kuramoto implémenté + 30 tests unitaires ✅  
+**Prochaine étape** : Sprint 2 — Intégration ArchipelPhase3 + validation MNIST
 
 ---
 
@@ -22,7 +22,7 @@
 | **Logger CSV** | ✅ 5 tests | `logger.py`, toutes les métriques logging |
 | **Save/load checkpoint** | ✅ 2 tests | Round-trip complet |
 | **Train script** (CLI + YAML) | ✅ 3 tests | `train.py`, `configs/default.yaml` |
-| **Tests unitaires** (19) | ✅ | 9 topk + 7 spec + 3 train — passent sur Modal |
+| **Tests unitaires** (49) | ✅ | 9 topk + 7 spec + 30 kuramoto + 3 train — passent sur Modal |
 | **Modal CI cloud** | ✅ | `modal_run.py`, `modal_validate.py` — temps réel |
 
 ### Validation MNIST — Résultats longs (50 epochs)
@@ -71,7 +71,7 @@ Les métriques entropiques (`specialization_score_precision_weighted`) donnent ~
 2. [x] ~~Décision sur la spécialisation~~ **FAITE** — Oui, on peut avancer
 
 ### Prochaine étape — Phase 3 : Résonance Kuramoto
-3. [ ] Implémenter un router par oscillateurs couplés (Kuramoto)
+3. [x] ~~Implémenter un router par oscillateurs couplés (Kuramoto)~~ **FAIT** — Sprint 1 terminé
 4. [ ] Valider sur MNIST : accuracy + spécialisation avec le nouveau routing
 5. [ ] Comparer avec le routing cosinus actuel
 
@@ -79,11 +79,11 @@ Les métriques entropiques (`specialization_score_precision_weighted`) donnent ~
 
 **Principe** : Remplacer `cos(island_state, input_repr)` par `cos(θ_i - φ(x))` où θ_i est la phase oscillatoire de l'île et φ(x) la phase cible de l'entrée. Les phases évoluent selon la dynamique Kuramoto : synchronisation si co-traitement, désynchronisation sinon.
 
-| Sprint | Contenu | Fichiers |
-|--------|---------|----------|
-| 1 | Routeur Kuramoto | `archipel/src/archipel/current/kuramoto.py` |
-| 2 | Intégration Archipel + Phase 3 | `loop_lifecycle.py` (nouveau `ArchipelPhase3`) |
-| 3 | Validation 3 seeds Modal | `modal_validate.py`, `validate_niveau1415.py` |
+| Sprint | Contenu | Fichiers | Statut |
+|--------|---------|----------|--------|
+| **1** | Routeur Kuramoto | `kuramoto.py` | ✅ **Terminé** — 30 tests |
+| 2 | Intégration ArchipelPhase3 + validation MNIST | `loop_lifecycle.py` | 🔲 En attente |
+| 3 | Validation 3 seeds Modal + comparaison | `modal_validate.py` | 🔲 En attente |
 
 ### Plus tard
 6. [ ] Ablation sans curriculum top-k
