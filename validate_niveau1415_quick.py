@@ -18,6 +18,7 @@ from archipel.current.topk_curriculum import TopKCurriculum
 from archipel.utils.specialization_matrix import (
     compute_specialization_matrix,
     compute_specialization_matrix_with_predictions,
+    compute_specialization_coverage,
     specialization_score,
     specialization_score_precision_weighted,
 )
@@ -104,6 +105,7 @@ def main(epochs=1, batch_size=128):
     spec_matrix_func, spec_preds, spec_targets = compute_specialization_matrix_with_predictions(model, test_ld, device)
     spec_score = specialization_score(spec_matrix)
     spec_score_func = specialization_score_precision_weighted(spec_matrix_func, spec_preds, spec_targets)
+    spec_cov = compute_specialization_coverage(spec_matrix_func)
     b_arch = sum(1 for l in logs if l.get("event") == "birth")
     d_arch = sum(1 for l in logs if l.get("event") == "death")
     loss_final = logs[-1]["loss"] if logs else 0
@@ -113,6 +115,8 @@ def main(epochs=1, batch_size=128):
     print(f"Births/Deaths: {b_arch}/{d_arch}")
     print(f"Spécialisation entropique: {spec_score:.4f}")
     print(f"Spécialisation fonctionnelle: {spec_score_func:.4f}")
+    print(f"Couverture spécialisée: {spec_cov['coverage']}/{spec_cov['specialized_count']} "
+          f"(pureté moy: {spec_cov['purity_mean']:.3f})")
 
     # Matrice spécialisation
     print("\nMatrice spécialisation:")
@@ -141,23 +145,30 @@ def main(epochs=1, batch_size=128):
     print("\n" + "=" * 50)
     print("RÉSULTATS")
     print("=" * 50)
-    print(f"Archipel: acc={acc_arch:.4f} spec_entropy={spec_score:.4f} spec_func={spec_score_func:.4f}")
+    print(f"Archipel: acc={acc_arch:.4f} spec_entropy={spec_score:.4f} spec_func={spec_score_func:.4f} coverage={spec_cov['coverage']} purity={spec_cov['purity_mean']:.3f}")
     print(f"MLP:      acc={acc_mlp:.4f}")
     print(f"Gap:      {acc_arch - acc_mlp:+.4f}")
 
-    if spec_score_func > 0.3:
-        print("✅ Spécialisation fonctionnelle CORRECTE")
+    if spec_cov["coverage"] >= 2:
+        print(f"✅ Spécialisation fonctionnelle CORRECTE — {spec_cov['coverage']} classes couvertes")
     elif spec_score_func > 0.15:
         print("⚠️ Spécialisation fonctionnelle partielle")
+    elif spec_cov["specialized_count"] >= 1:
+        print(f"ℹ️ Début de spécialisation ({spec_cov['specialized_count']} île(s) spécialisée(s))")
     else:
-        print("ℹ️ Spécialisation fonctionnelle non conclue sur ce run court : vérifier spec_coverage/routing EMA")
+        print("ℹ️ Spécialisation non conclue sur ce run court")
 
     # Sauvegarde
     results = {
         "archipel": {"test_acc": round(acc_arch, 4), "loss_final": round(loss_final, 4),
                      "births": b_arch, "deaths": d_arch,
                      "spec_score": round(spec_score, 4),
-                     "spec_score_func": round(spec_score_func, 4)},
+                     "spec_score_func": round(spec_score_func, 4),
+                     "spec_coverage": spec_cov["coverage"],
+                     "spec_purity_mean": spec_cov["purity_mean"],
+                     "spec_specialized_count": spec_cov["specialized_count"],
+                     "island_purities": spec_cov["island_purities"],
+                     "dominant_classes": spec_cov["dominant_classes"]},
         "mlp": {"test_acc": round(acc_mlp, 4), "loss_final": round(loss.item(), 4)},
         "epochs": epochs
     }

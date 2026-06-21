@@ -141,3 +141,61 @@ def specialization_score_precision_weighted(
     accuracy = (predictions == targets).float().mean().item()
     raw_score = specialization_score(matrix)
     return float(raw_score * accuracy)
+
+
+def compute_specialization_coverage(
+    matrix: torch.Tensor,
+    purity_threshold: float = 0.40,
+) -> dict:
+    """Compute specialization coverage based on island-class purity.
+
+    Pour chaque île, calcule la fraction de ses prédictions qui tombe sur
+    sa classe dominante. Compte ensuite combien de classes distinctes ont
+    au moins une île dont la pureté dépasse le seuil.
+
+    Contrairement au score entropique (pénalisé par les îles généralistes),
+    cette métrique identifie directement les îles spécialisées : un système
+    avec 2 îles spécialisées (classes 5 et 8) et 2 généralistes obtiendra
+    coverage=2, même si l'entropie moyenne est basse.
+
+    Args:
+        matrix: Matrice (num_islands, num_classes) de comptes (raw ou corrects).
+        purity_threshold: Seuil de pureté pour compter une classe comme
+                         couverte par une île spécialisée (défaut: 0.40).
+
+    Returns:
+        dict with:
+        - island_purities (list[float]): pureté par île (fraction max)
+        - dominant_classes (list[int]): classe dominante par île
+        - purity_mean (float): pureté moyenne sur toutes les îles
+        - specialized_count (int): nombre d'îles avec pureté > seuil
+        - coverage (int): nombre de classes avec au moins une île spécialisée
+        - coverage_threshold (float): le seuil utilisé
+    """
+    total = matrix.sum(dim=1, keepdim=True).clamp(min=1)
+    probs = matrix / total  # [num_islands, num_classes]
+
+    # Meilleure classe par île
+    max_probs, dominant = probs.max(dim=1)  # [num_islands]
+
+    island_purities = max_probs.tolist()
+    dominant_classes = dominant.tolist()
+
+    purity_mean = float(max_probs.mean().item())
+    specialized_count = int((max_probs > purity_threshold).sum().item())
+
+    # Coverage : classes distinctes couvertes par des îles spécialisées
+    covered = set()
+    for i in range(matrix.size(0)):
+        if island_purities[i] > purity_threshold:
+            covered.add(int(dominant[i].item()))
+    coverage = len(covered)
+
+    return {
+        "island_purities": island_purities,
+        "dominant_classes": dominant_classes,
+        "purity_mean": round(purity_mean, 4),
+        "specialized_count": specialized_count,
+        "coverage": coverage,
+        "coverage_threshold": purity_threshold,
+    }
