@@ -8,7 +8,9 @@ Usage:
     modal run modal_validate.py --multi-long       # 3×50 epochs (seeds 42, 123, 256)
     modal run modal_validate.py --kuramoto         # Cosine vs Kuramoto comparison (5 epochs)
     modal run modal_validate.py --multi-kuramoto   # 3 seeds × 2 modes × 50 epochs
-    modal run modal_validate.py --all              # Tout
+    modal run modal_validate.py --cifar10           # CIFAR-10: 3 seeds × 2 modes × 5 epochs
+    modal run modal_validate.py --cifar10-long       # CIFAR-10: 30 epochs
+    modal run modal_validate.py --all                # Tout
 """
 
 import sys
@@ -21,8 +23,7 @@ app = modal.App("archipel-validate")
 image = (
     modal.Image.debian_slim()
     .apt_install("git")
-    .pip_install(["torch>=2.0.0", "torchvision>=0.15.0"],
-                  index_url="https://download.pytorch.org/whl/cpu")
+    .pip_install(["torch>=2.0.0", "torchvision>=0.15.0"])
     .pip_install("numpy>=2.0.0")
     .pip_install("pyyaml>=6.0.0")
     .pip_install("pytest>=8.0.0")
@@ -32,6 +33,7 @@ image = (
 @app.local_entrypoint()
 def main(quick: bool = False, mnist: bool = False, all: bool = False, long: bool = False,
          multi_long: bool = False, kuramoto: bool = False, multi_kuramoto: bool = False,
+         cifar10: bool = False, cifar10_long: bool = False,
          seed: int = 42):
     """Run Archipel validation suite on Modal cloud."""
 
@@ -48,6 +50,23 @@ def main(quick: bool = False, mnist: bool = False, all: bool = False, long: bool
                 result = run_validation.remote(modes=[f"mnist50:{mode}"], seed=s)
                 print(result["summary"])
         print("\n✅ ALL 6 KURAMOTO COMPARISON RUNS COMPLETED")
+        return
+
+    if cifar10 or cifar10_long:
+        epochs = 30 if cifar10_long else 5
+        label = f"{epochs} epochs"
+        seeds = [42, 123, 256]
+        print(f"🚀 CIFAR-10 Validation — {label}, 3 seeds × 2 modes")
+        print(f"   Running on Modal GPU instance…\n")
+        for s in seeds:
+            for mode in ["cosine", "kuramoto"]:
+                print(f"\n{'='*60}")
+                print(f"  ▶ CIFAR-10 {epochs} epochs — seed={s} — mode={mode}")
+                print(f"{'='*60}")
+                params = {"epochs": epochs, "seed": s, "mode": mode}
+                result = run_validation.remote(modes=[f"cifar10:{mode}"], seed=s, extra_params=params)
+                print(result["summary"])
+        print(f"\n✅ ALL 6 CIFAR-10 COMPARISON RUNS COMPLETED")
         return
 
     if kuramoto:
@@ -103,10 +122,11 @@ def main(quick: bool = False, mnist: bool = False, all: bool = False, long: bool
 
 @app.function(
     image=image,
-    timeout=3600,  # 60 min max for long runs
+    gpu="T4",
+    timeout=7200,  # 2 hours max for CIFAR-10 long runs
     retries=1,
 )
-def run_validation(modes: list, seed: int) -> dict:
+def run_validation(modes: list, seed: int = 42, extra_params: dict | None = None) -> dict:
     import subprocess, json, time
 
     cwd = "/archipel"
@@ -236,6 +256,23 @@ def run_validation(modes: list, seed: int) -> dict:
              "--epochs", "5", "--batch-size", "64",
              "--seeds", "42", "123", "256", "--data-size", "10000"],
             timeout=1200
+        )
+
+    # ── Step 6: CIFAR-10 comparison ──
+    if any(m.startswith("cifar10") for m in modes):
+        ep = extra_params.get("epochs", 5) if extra_params else 5
+        s = extra_params.get("seed", 42) if extra_params else 42
+        mode = extra_params.get("mode", "cosine") if extra_params else "cosine"
+        cmd = [sys.executable, "validate_kuramoto_compare.py",
+               "--dataset", "cifar10",
+               "--epochs", str(ep), "--batch-size", "64",
+               "--seeds", str(s)]
+        if mode == "cosine":
+            cmd.append("--no-kuramoto")
+        run_step(
+            f"CIFAR-10 {ep} epochs (seed={s}, mode={mode})",
+            cmd,
+            timeout=3600
         )
 
     # ── Summary ──

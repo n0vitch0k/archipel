@@ -161,7 +161,9 @@ def train_mnist_compare(
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     courant = Courant(num_islands=4)
-    device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda":
+        model = model.cuda()
 
     # Eval before
     model.eval()
@@ -169,6 +171,7 @@ def train_mnist_compare(
         eval_loader = DataLoader(mnist_subset, batch_size=512, shuffle=False, num_workers=0)
         all_preds, all_labels = [], []
         for x_eval, y_eval in eval_loader:
+            x_eval, y_eval = x_eval.to(device), y_eval.to(device)
             out = model(x_eval)
             all_preds.append(out["output"].argmax(dim=1))
             all_labels.append(y_eval)
@@ -197,6 +200,7 @@ def train_mnist_compare(
     with torch.no_grad():
         all_preds, all_labels = [], []
         for x_eval, y_eval in eval_loader:
+            x_eval, y_eval = x_eval.to(device), y_eval.to(device)
             out = model(x_eval)
             all_preds.append(out["output"].argmax(dim=1))
             all_labels.append(y_eval)
@@ -265,7 +269,9 @@ def train_cifar10_compare(
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     courant = Courant(num_islands=4)
-    device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda":
+        model = model.cuda()
 
     # Eval before
     model.eval()
@@ -273,6 +279,7 @@ def train_cifar10_compare(
         eval_loader = DataLoader(cifar_subset, batch_size=512, shuffle=False, num_workers=0)
         all_preds, all_labels = [], []
         for x_eval, y_eval in eval_loader:
+            x_eval, y_eval = x_eval.to(device), y_eval.to(device)
             out = model(x_eval)
             all_preds.append(out["output"].argmax(dim=1))
             all_labels.append(y_eval)
@@ -301,6 +308,7 @@ def train_cifar10_compare(
     with torch.no_grad():
         all_preds, all_labels = [], []
         for x_eval, y_eval in eval_loader:
+            x_eval, y_eval = x_eval.to(device), y_eval.to(device)
             out = model(x_eval)
             all_preds.append(out["output"].argmax(dim=1))
             all_labels.append(y_eval)
