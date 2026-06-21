@@ -75,6 +75,16 @@ Les métriques entropiques (`specialization_score_precision_weighted`) donnent ~
 4. [ ] Valider sur MNIST : accuracy + spécialisation avec le nouveau routing
 5. [ ] Comparer avec le routing cosinus actuel
 
+**Plan détaillé** : `doc/phase3_kuramoto_plan.md`
+
+**Principe** : Remplacer `cos(island_state, input_repr)` par `cos(θ_i - φ(x))` où θ_i est la phase oscillatoire de l'île et φ(x) la phase cible de l'entrée. Les phases évoluent selon la dynamique Kuramoto : synchronisation si co-traitement, désynchronisation sinon.
+
+| Sprint | Contenu | Fichiers |
+|--------|---------|----------|
+| 1 | Routeur Kuramoto | `archipel/src/archipel/current/kuramoto.py` |
+| 2 | Intégration Archipel + Phase 3 | `loop_lifecycle.py` (nouveau `ArchipelPhase3`) |
+| 3 | Validation 3 seeds Modal | `modal_validate.py`, `validate_niveau1415.py` |
+
 ### Plus tard
 6. [ ] Ablation sans curriculum top-k
 7. [ ] Validation sur CIFAR-10 (tâche plus dure)
