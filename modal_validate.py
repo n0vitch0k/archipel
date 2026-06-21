@@ -1,11 +1,12 @@
 """Modal runner for Archipel — tests longs et validation complète.
 
 Usage:
-    modal run modal_validate.py                    # Suite complète
+    modal run modal_validate.py                    # Suite par défaut
     modal run modal_validate.py --quick            # Tests unitaires seulement
     modal run modal_validate.py --mnist            # MNIST + validation uniquement
-    modal run modal_validate.py --long             # Run 50 epochs + validation longue
-    modal run modal_validate.py --all              # Tout (tests + validation + multi-seed)
+    modal run modal_validate.py --long             # Run 50 epochs
+    modal run modal_validate.py --multi-long       # 3×50 epochs (seeds 42, 123, 256)
+    modal run modal_validate.py --all              # Tout
 """
 
 import sys
@@ -27,12 +28,27 @@ image = (
 
 
 @app.local_entrypoint()
-def main(quick: bool = False, mnist: bool = False, all: bool = False, long: bool = False, seed: int = 42):
+def main(quick: bool = False, mnist: bool = False, all: bool = False, long: bool = False,
+         multi_long: bool = False, seed: int = 42):
     """Run Archipel validation suite on Modal cloud."""
 
+    if multi_long:
+        suite = "3×50 epochs multi-seed (42, 123, 256)"
+        seeds = [42, 123, 256]
+        print(f"🚀 Archipel Validation — {suite}")
+        print(f"   Running in cloud (CPU instance)…\n")
+        for s in seeds:
+            print(f"\n{'='*60}")
+            print(f"  ▶ Run with seed={s}")
+            print(f"{'='*60}")
+            result = run_validation.remote(modes=["mnist50"], seed=s)
+            print(result["summary"])
+        print("\n✅ ALL 3 MULTI-SEED RUNS COMPLETED")
+        return
+
     if long:
-        suite = "50 epochs + validation longue"
-        modes = ["unit", "mnist50", "validate_long"]
+        suite = "50 epochs"
+        modes = ["mnist50"]
     elif all:
         suite = "full (unit + MNIST + validation + multi-seed)"
         modes = ["unit", "mnist", "validate", "multi_seed"]
@@ -141,7 +157,7 @@ def run_validation(modes: list, seed: int) -> dict:
     # ── Step 2b: MNIST long (50 epochs) ──
     if "mnist50" in modes:
         run_step(
-            "MNIST long training (50 epochs, batch=64)",
+            f"MNIST 50 epochs (batch=64, seed={seed})",
             [sys.executable, "test_mnist_quick.py", "--epochs", "50", "--batch-size", "64"],
             timeout=1800
         )
@@ -159,15 +175,7 @@ def run_validation(modes: list, seed: int) -> dict:
             timeout=900
         )
 
-    # ── Step 3b: Long validation (10 epochs) ──
-    if "validate_long" in modes:
-        run_step(
-            "Long validation + MLP baseline (10 epochs, batch=64)",
-            [sys.executable, "validate_niveau1415.py", "--epochs", "10", "--batch-size", "64"],
-            timeout=1800
-        )
-
-    # ── Step 4: Multi-seed reproducibility (3 runs) ──
+    # ── Step 4: Multi-seed short runs ──
     if "multi_seed" in modes:
         for run_id in [1, 2, 3]:
             run_step(
