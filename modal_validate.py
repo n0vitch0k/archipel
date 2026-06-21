@@ -150,6 +150,7 @@ def run_validation(modes: list, seed: int) -> dict:
     if "unit" in modes:
         for tf in [("top-k curriculum", "test_topk_curriculum.py", 120),
                    ("specialization", "test_specialization.py", 120),
+                   ("Kuramoto router", "archipel/src/archipel/current/test_kuramoto.py", 120),
                    ("train script", "test_train_script.py", 120)]:
             run_step(
                 f"Unit test: {tf[0]}",
