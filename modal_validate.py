@@ -97,6 +97,13 @@ def run_validation(modes: list, seed: int) -> dict:
         capture_output=True, text=True, timeout=60
     )
     if r.returncode != 0:
+        # Retry with removal (stale dir from previous run in same container)
+        subprocess.run(["rm", "-rf", cwd], capture_output=True)
+        r = subprocess.run(
+            ["git", "clone", "--depth=1", repo_url, cwd],
+            capture_output=True, text=True, timeout=60
+        )
+    if r.returncode != 0:
         return {"summary": f"❌ git clone failed:\n{r.stderr}", "exit_code": 1}
 
     # Install package
@@ -121,9 +128,13 @@ def run_validation(modes: list, seed: int) -> dict:
         out = r.stdout.strip()
         err = r.stderr.strip()
 
-        # Print last 20 lines of output
+        # Print all output for 50-epoch runs (to see diagnostics), else last 20 lines
         out_lines = out.split("\n")
-        for l in out_lines[-20:]:
+        if "50 epochs" in label:
+            window = out_lines[-40:]
+        else:
+            window = out_lines[-20:]
+        for l in window:
             print(f"  {l}")
         if err:
             print(f"  [stderr] {err[:500]}")
