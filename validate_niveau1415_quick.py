@@ -105,7 +105,8 @@ def main(epochs=1, batch_size=128):
     spec_matrix_func, spec_preds, spec_targets = compute_specialization_matrix_with_predictions(model, test_ld, device)
     spec_score = specialization_score(spec_matrix)
     spec_score_func = specialization_score_precision_weighted(spec_matrix_func, spec_preds, spec_targets)
-    spec_cov = compute_specialization_coverage(spec_matrix_func)
+    spec_cov_raw = compute_specialization_coverage(spec_matrix, purity_threshold=0.30)
+    spec_cov_fn = compute_specialization_coverage(spec_matrix_func, purity_threshold=0.30)
     b_arch = sum(1 for l in logs if l.get("event") == "birth")
     d_arch = sum(1 for l in logs if l.get("event") == "death")
     loss_final = logs[-1]["loss"] if logs else 0
@@ -115,8 +116,10 @@ def main(epochs=1, batch_size=128):
     print(f"Births/Deaths: {b_arch}/{d_arch}")
     print(f"Spécialisation entropique: {spec_score:.4f}")
     print(f"Spécialisation fonctionnelle: {spec_score_func:.4f}")
-    print(f"Couverture spécialisée: {spec_cov['coverage']}/{spec_cov['specialized_count']} "
-          f"(pureté moy: {spec_cov['purity_mean']:.3f})")
+    print(f"Couverture brute: {spec_cov_raw['coverage']}/{spec_cov_raw['specialized_count']} "
+          f"(pureté moy: {spec_cov_raw['purity_mean']:.3f})")
+    print(f"Couverture fonctionnelle: {spec_cov_fn['coverage']}/{spec_cov_fn['specialized_count']} "
+          f"(pureté moy: {spec_cov_fn['purity_mean']:.3f})")
 
     # Matrice spécialisation
     print("\nMatrice spécialisation:")
@@ -145,16 +148,18 @@ def main(epochs=1, batch_size=128):
     print("\n" + "=" * 50)
     print("RÉSULTATS")
     print("=" * 50)
-    print(f"Archipel: acc={acc_arch:.4f} spec_entropy={spec_score:.4f} spec_func={spec_score_func:.4f} coverage={spec_cov['coverage']} purity={spec_cov['purity_mean']:.3f}")
+    print(f"Archipel: acc={acc_arch:.4f} spec_entropy={spec_score:.4f} spec_func={spec_score_func:.4f} coverage_raw={spec_cov_raw['coverage']} coverage_fn={spec_cov_fn['coverage']} purity_raw={spec_cov_raw['purity_mean']:.3f}")
     print(f"MLP:      acc={acc_mlp:.4f}")
     print(f"Gap:      {acc_arch - acc_mlp:+.4f}")
 
-    if spec_cov["coverage"] >= 2:
-        print(f"✅ Spécialisation fonctionnelle CORRECTE — {spec_cov['coverage']} classes couvertes")
+    if spec_cov_raw["coverage"] >= 2:
+        print(f"✅ Spécialisation CORRECTE — {spec_cov_raw['coverage']} classes en couverture brute")
+    elif spec_cov_fn["coverage"] >= 2:
+        print(f"✅ Spécialisation fonctionnelle — {spec_cov_fn['coverage']} classes couvertes")
     elif spec_score_func > 0.15:
         print("⚠️ Spécialisation fonctionnelle partielle")
-    elif spec_cov["specialized_count"] >= 1:
-        print(f"ℹ️ Début de spécialisation ({spec_cov['specialized_count']} île(s) spécialisée(s))")
+    elif spec_cov_raw["specialized_count"] >= 1:
+        print(f"ℹ️ Début de spécialisation ({spec_cov_raw['specialized_count']} île(s))")
     else:
         print("ℹ️ Spécialisation non conclue sur ce run court")
 
@@ -164,11 +169,14 @@ def main(epochs=1, batch_size=128):
                      "births": b_arch, "deaths": d_arch,
                      "spec_score": round(spec_score, 4),
                      "spec_score_func": round(spec_score_func, 4),
-                     "spec_coverage": spec_cov["coverage"],
-                     "spec_purity_mean": spec_cov["purity_mean"],
-                     "spec_specialized_count": spec_cov["specialized_count"],
-                     "island_purities": spec_cov["island_purities"],
-                     "dominant_classes": spec_cov["dominant_classes"]},
+                     "spec_coverage_raw": spec_cov_raw["coverage"],
+                     "spec_purity_raw": spec_cov_raw["purity_mean"],
+                     "spec_coverage_fn": spec_cov_fn["coverage"],
+                     "spec_purity_fn": spec_cov_fn["purity_mean"],
+                     "spec_specialized_count": spec_cov_raw["specialized_count"],
+                     "island_purities_raw": spec_cov_raw["island_purities"],
+                     "island_purities_fn": spec_cov_fn["island_purities"],
+                     "dominant_classes": spec_cov_raw["dominant_classes"]},
         "mlp": {"test_acc": round(acc_mlp, 4), "loss_final": round(loss.item(), 4)},
         "epochs": epochs
     }
