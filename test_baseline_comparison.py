@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "archipel" / "src"))
 
 from archipel.training.loop_lifecycle import ArchipelPhase2, train_loop_lifecycle
 from archipel.current.courant import Courant
+from archipel.current.topk_curriculum import TopKCurriculum, RoutingUsageTracker
 
 
 # ─── Encodeur ───
@@ -88,9 +89,11 @@ def main():
     opt=optim.Adam(model.parameters(),lr=1e-3)
     courant=Courant(num_islands=4)
     model._dataloader_for_distillation=train_ld
+    curriculum=TopKCurriculum(num_islands=model.num_islands,k_init=3,k_final=1,warmup_steps=150)
+    routing_tracker=RoutingUsageTracker(num_islands=model.num_islands)
 
     t0=time.time()
-    logs,_=train_loop_lifecycle(model,train_ld,opt,courant,epochs=epochs,device=device,log_every=50)
+    logs,_=train_loop_lifecycle(model,train_ld,opt,courant,epochs=epochs,device=device,log_every=50,top_k_curriculum=curriculum,routing_usage_tracker=routing_tracker)
     t1=time.time()
     acc_arch=evaluate(model,test_ld,device)
     b_arch=sum(1 for l in logs if l.get('event')=='birth')

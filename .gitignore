@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Project-specific
+logs/
+checkpoints/
+data/
+*.pt
+*.pth
+
+# Temporary diagnostic scripts
+diagnostic_*.py
+baseline_comparison.json
+test_quick.py
+
+# Environment
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter checkpoints
+.ipynb_checkpoints/

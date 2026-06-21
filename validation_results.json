@@ -1,16 +1,15 @@
 {
   "archipel": {
-    "acc_train": 0.9987,
-    "acc_test": 0.9887,
-    "loss_final": 0.8384,
-    "num_islands": 4,
-    "births": 378,
-    "deaths": 378,
-    "spec_score": 0.0009
+    "test_acc": 0.944,
+    "loss_final": 2.2485,
+    "births": 0,
+    "deaths": 0,
+    "spec_score": 0.0023,
+    "spec_score_func": 0.0014
   },
   "mlp": {
-    "acc_train": 0.9985,
-    "acc_test": 0.9903,
-    "loss_final": 0.0017
-  }
+    "test_acc": 0.9846,
+    "loss_final": 0.0077
+  },
+  "epochs": 3
 }

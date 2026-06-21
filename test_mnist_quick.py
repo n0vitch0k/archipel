@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "archipel" / "src"))
 
 from archipel.training.loop_lifecycle import ArchipelPhase2, train_loop_lifecycle
 from archipel.current.courant import Courant
+from archipel.current.topk_curriculum import TopKCurriculum, RoutingUsageTracker
 
 
 # ── Encodeur CNN 28×28 → 128 ─────────────────────────────────────────────────
@@ -110,7 +111,7 @@ def train_mnist_quick(epochs: int = 5, batch_size: int = 64) -> dict:
     device = "cpu"
     print(f"\nConfig   : epochs={epochs}, batch_size={batch_size}, device={device}")
     print(f"Données  : {len(mnist_full)} images MNIST (évaluation sur {len(mnist)} sous-ensemble) — encodeur CNN 28×28→128")
-    print(f"Modèle   : {model.num_islands} îlots, top_k=2, max=8, min=2")
+    print(f"Modèle   : {model.num_islands} îlots, top-k curriculum 3→2→1, max=8, min=2")
 
     # ── Évaluation avant entraînement ─────────────────────────────────────────
     model.eval()
@@ -127,11 +128,21 @@ def train_mnist_quick(epochs: int = 5, batch_size: int = 64) -> dict:
     model.train()
     print(f"\nAccuracy avant entraînement : {acc_before:.4f}")
 
+    curriculum = TopKCurriculum(
+        num_islands=model.num_islands,
+        k_init=3,
+        k_final=1,
+        warmup_steps=150,
+    )
+    routing_tracker = RoutingUsageTracker(num_islands=model.num_islands)
+
     # ── Entraînement ──────────────────────────────────────────────────────────
     print("\n--- Début entraînement ---")
     logs, _ = train_loop_lifecycle(
         model, loader, optimizer, courant,
         epochs=epochs, device=device, log_every=50,
+        top_k_curriculum=curriculum,
+        routing_usage_tracker=routing_tracker,
     )
     print("--- Fin entraînement ---\n")
 

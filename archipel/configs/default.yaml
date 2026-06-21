@@ -1,3 +1,9 @@
+# Archipel Phase 2 — default curriculum configuration
+#
+# V1 dynamic top-k: 3 -> 2 -> 1 over warmup_steps, then freeze at k=1.
+# This keeps exploration broad at the start, then tightens competition so
+# functional specialization can emerge before resonance.
+
 model:
   num_islands: 4
   input_dim: 128
@@ -6,19 +12,25 @@ model:
   top_k: 2
   max_islands: 8
   min_islands: 2
-  coherence_variance_threshold: 0.3
+  coherence_variance_threshold: 0.5
 
 training:
-  lr: 0.001
   epochs: 50
   batch_size: 16
-  log_every: 10
-  save_every: 10
-  checkpoint_dir: checkpoints
+  lr: 1.0e-3
   device: cpu
+  log_every: 10
+  checkpoint_dir: checkpoints
 
 data:
   num_samples: 2000
   input_dim: 128
   num_classes: 10
   signal_strength: 0.7
+
+top_k_curriculum:
+  enabled: true
+  k_init: 3
+  k_final: 1
+  warmup_steps: 300
+  freeze_step: null

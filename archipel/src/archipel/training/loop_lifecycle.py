@@ -15,8 +15,9 @@ from ..islands.specialization import IslandSpecialization
 from ..ocean.ocean import Ocean, OceanSpace
 from ..current.router import HyperNetworkRouter, HyperNetworkGenerator, init_island_states
 from ..current.courant import Courant
+from ..current.topk_curriculum import TopKCurriculum, RoutingUsageTracker
 from .loop import (
-    ArchipelPhase1 as ArchipelPhase1Base,
+    ArchipelPhase1,
     compute_coherence_loss,
     compute_diversity_loss,
     compute_structural_reg_loss,
@@ -24,7 +25,82 @@ from .loop import (
 )
 
 
-class ArchipelPhase2(ArchipelPhase1Base):
+def _format_messages(messages: List[str]) -> str:
+    return " | ".join(msg for msg in messages if msg)
+
+
+def _routing_diagnostic_messages(
+    metrics: Dict[str, Any],
+    num_islands: int,
+    scheduled_top_k: int,
+    global_step: int,
+) -> List[str]:
+    messages: List[str] = []
+    if global_step == 0:
+        messages.append(f"top-k curriculum active: k={scheduled_top_k}")
+
+    dead_count = int(metrics.get("dead_island_count", 0))
+    min_usage = float(metrics.get("min_usage_ratio", 1.0))
+    entropy = float(metrics.get("routing_usage_entropy", 1.0))
+    effective_top_k = float(metrics.get("effective_top_k", 0.0))
+
+    if dead_count > 0:
+        messages.append(f"dead_island_count={dead_count}: au moins une île est sous-utilisée")
+    elif min_usage < 0.05:
+        messages.append(f"min_usage_ratio={min_usage:.4f}: risque de monopolisation")
+    elif scheduled_top_k == 1 and entropy < 0.35:
+        messages.append(f"routing_usage_entropy={entropy:.3f}: usage très concentré")
+    elif scheduled_top_k > 1 and entropy > 0.75:
+        messages.append(f"routing_usage_entropy={entropy:.3f}: exploration encore large")
+
+    if effective_top_k < max(1.0, scheduled_top_k - 0.75):
+        messages.append(
+            f"effective_top_k={effective_top_k:.2f} < scheduled_top_k={scheduled_top_k}"
+        )
+
+    if num_islands > 1 and dead_count == 0 and min_usage >= 0.05:
+        messages.append("routing sain: toutes les îles reçoivent de l'usage")
+
+    return messages
+
+
+def _specialization_diagnostic_messages(spec_state: Dict[str, Any], global_step: int) -> List[str]:
+    messages: List[str] = []
+    coverage = int(spec_state.get("spec_coverage", 0))
+    specialized = int(spec_state.get("specialized_island_count", 0))
+    spec_std = float(spec_state.get("spec_std", 0.0))
+    spec_max = float(spec_state.get("spec_max", 0.0))
+    purity_mean = float(spec_state.get("specialization_purity_mean", 0.0))
+
+    if specialized > 1 and coverage <= 1:
+        messages.append(f"spec_coverage={coverage}: risque de collapse sur une seule classe")
+    elif coverage == 0 and global_step >= 20 and specialized == 0:
+        messages.append("spec_coverage=0: spécialisation fonctionnelle pas encore visible")
+    elif coverage >= 2:
+        messages.append(f"spec_coverage={coverage}: couverture fonctionnelle en cours")
+
+    if spec_std < 1e-4 and spec_max > 0.5:
+        messages.append("spec_std≈0: les îles spécialisées ont une force très similaire")
+
+    if purity_mean >= 0.75:
+        messages.append(f"purity_mean={purity_mean:.3f}: scores de spécialisation nets")
+
+    return messages
+
+
+def _lifecycle_diagnostic_messages(lifecycle_state: Dict[str, Any]) -> List[str]:
+    messages: List[str] = []
+    phase = str(lifecycle_state.get("lifecycle_phase", ""))
+    if phase == "birth":
+        messages.append("lifecycle=birth: nouvelle île créée")
+    elif phase == "death":
+        messages.append("lifecycle=death: île retirée")
+    elif phase == "stable":
+        messages.append("lifecycle=stable")
+    return messages
+
+
+class ArchipelPhase2(ArchipelPhase1):
     """Phase 2 Archipel model: dynamic islands + lifecycle + Courant.
 
     Extends Phase 1 with:
@@ -111,9 +187,13 @@ class ArchipelPhase2(ArchipelPhase1Base):
             num_islands=max_islands,
             num_classes=10,  # matches task_head output
             ema_alpha=0.1,
-            specialization_boost=0.3,
+            specialization_boost=1.0,
         )
-        # Sync _num_active_islands with actual island count
+
+        # The shared task_head keeps the main Archipel output compact, while this
+        # bias lets island_outputs diverge by island during strict specialization.
+        self.island_output_bias = nn.Parameter(torch.randn(max_islands, 10) * 0.5)
+
         self.specialization._num_active_islands = num_islands
 
     def get_config(self) -> Dict[str, Any]:
@@ -162,6 +242,7 @@ class ArchipelPhase2(ArchipelPhase1Base):
                 "num_active_islands": self.specialization.num_active_islands,
                 "scores": self.specialization.scores.detach().cpu().clone(),
                 "counts": self.specialization.counts.detach().cpu().clone(),
+                "output_bias": self.island_output_bias.detach().cpu().clone(),
             },
             "lifecycle_runtime": {
                 "steps_since_birth": self.lifecycle._steps_since_birth,
@@ -200,6 +281,11 @@ class ArchipelPhase2(ArchipelPhase1Base):
             model.specialization.register_buffer("counts", counts.clone())
             model.specialization.num_islands = int(spec_state["num_islands"])
             model.specialization.num_active_islands = int(spec_state["num_active_islands"])
+            if "output_bias" in spec_state:
+                bias = spec_state["output_bias"].to(model.island_output_bias.device)
+                copy_rows = min(bias.size(0), model.island_output_bias.size(0))
+                with torch.no_grad():
+                    model.island_output_bias[:copy_rows, :bias.size(1)].copy_(bias[:copy_rows, :bias.size(1)])
 
         lifecycle_runtime = checkpoint.get("lifecycle_runtime", {})
         model.lifecycle._steps_since_birth = int(lifecycle_runtime.get("steps_since_birth", 0))
@@ -253,7 +339,7 @@ class ArchipelPhase2(ArchipelPhase1Base):
             new_island.local_projection.bias.data[:gen_slice.numel()] = gen_slice
 
         self.islands.append(new_island)
-        self.num_islands += 1
+        self.num_islands = len(self.islands)
 
         # Expand ocean space (resize all island-dependent buffers)
         self.ocean.space.resize(self.num_islands)
@@ -267,6 +353,13 @@ class ArchipelPhase2(ArchipelPhase1Base):
             new_thresholds[:old_num] = old_thresholds.data.clone()
         self.router.island_thresholds = nn.Parameter(new_thresholds)
 
+        old_bias = self.island_output_bias
+        with torch.no_grad():
+            new_bias = torch.zeros(self.num_islands, old_bias.size(1), device=old_bias.device, dtype=old_bias.dtype)
+            new_bias[:old_num, :old_bias.size(1)] = old_bias[:old_num, :old_bias.size(1)]
+        self.island_output_bias = nn.Parameter(new_bias)
+
+        # Update lifecycle
         self.lifecycle.num_islands = self.num_islands
 
         # Sync specialization capacity before resize
@@ -333,7 +426,7 @@ class ArchipelPhase2(ArchipelPhase1Base):
         for i in range(island_id, len(self.islands)):
             self.islands[i].island_id = i
 
-        self.num_islands -= 1
+        self.num_islands = len(self.islands)
 
         # Resize ocean space buffers for the new island count
         self.ocean.space.resize(self.num_islands)
@@ -343,11 +436,21 @@ class ArchipelPhase2(ArchipelPhase1Base):
         with torch.no_grad():
             new_thresholds = torch.zeros(self.num_islands, device=self.router.island_thresholds.device)
             # Copy all except the removed island
-            kept = [i for i in range(len(self.islands) + 1) if i != island_id]
-            for new_i, old_i in enumerate(kept):
+            kept_thresholds = [i for i in range(len(self.router.island_thresholds)) if i != island_id]
+            kept_thresholds = kept_thresholds[: self.num_islands]
+            for new_i, old_i in enumerate(kept_thresholds):
                 if old_i < len(self.router.island_thresholds):
                     new_thresholds[new_i] = self.router.island_thresholds[old_i].detach().clone()
         self.router.island_thresholds = nn.Parameter(new_thresholds)
+
+        old_bias = self.island_output_bias
+        with torch.no_grad():
+            new_bias = torch.zeros(self.num_islands, old_bias.size(1), device=old_bias.device, dtype=old_bias.dtype)
+            kept_bias = [i for i in range(old_bias.size(0)) if i != island_id]
+            kept_bias = kept_bias[: self.num_islands]
+            for new_i, old_i in enumerate(kept_bias):
+                new_bias[new_i, :old_bias.size(1)] = old_bias[old_i, :old_bias.size(1)]
+        self.island_output_bias = nn.Parameter(new_bias)
 
         # Update lifecycle
         self.lifecycle.num_islands = self.num_islands
@@ -434,7 +537,9 @@ class ArchipelPhase2(ArchipelPhase1Base):
         num_islands, batch_sz, _ = island_embeds.shape
         flat = island_embeds.reshape(num_islands * batch_sz, self.ocean_dim)
         island_logits = self.task_head(flat)                      # (num_islands * batch, num_classes)
-        island_outputs = island_logits.reshape(num_islands, batch_sz, -1).transpose(0, 1)  # (batch, num_islands, num_classes)
+        island_logits = island_logits.reshape(num_islands, batch_sz, -1).transpose(0, 1)  # (batch, num_islands, num_classes)
+        island_logits = island_logits + self.island_output_bias[:num_islands].unsqueeze(0)
+        island_outputs = island_logits
 
         return {
             "output": output,
@@ -448,6 +553,7 @@ class ArchipelPhase2(ArchipelPhase1Base):
         }
 
 
+
 def train_loop_lifecycle(
     model: ArchipelPhase2,
     dataloader: DataLoader,
@@ -456,6 +562,8 @@ def train_loop_lifecycle(
     epochs: int = 1,
     device: str = "cpu",
     log_every: int = 10,
+    top_k_curriculum: Optional[TopKCurriculum] = None,
+    routing_usage_tracker: Optional[RoutingUsageTracker] = None,
 ) -> Tuple[List[Dict[str, float]], Courant]:
     """Run training loop with island lifecycle management.
 
@@ -467,6 +575,8 @@ def train_loop_lifecycle(
         epochs: Number of epochs.
         device: Device to train on.
         log_every: Log every N batches.
+        top_k_curriculum: Optional dynamic top-k curriculum controller.
+        routing_usage_tracker: Optional routing usage EMA tracker.
 
     Returns:
 Tuple of (logs, updated_courant).
@@ -482,20 +592,46 @@ Tuple of (logs, updated_courant).
 
     logs: List[Dict[str, float]] = []
     prev_routing_weights: Optional[torch.Tensor] = None
+    stable_specialization_batches = 0
+    if top_k_curriculum is None:
+        top_k_curriculum = TopKCurriculum(
+            num_islands=model.num_islands,
+            k_init=model.top_k,
+            k_final=model.top_k,
+            warmup_steps=0,
+        )
+    else:
+        top_k_curriculum.resize(model.num_islands)
+        # Keep freeze_step explicit: None means the schedule itself decides
+        # (e.g. k=3 -> 2 -> 1 over warmup_steps, then k_final forever).
+        # Only infer a freeze when a legacy curriculum already supplied one
+        # through model config or caller state.
+        if top_k_curriculum.freeze_step is not None:
+            top_k_curriculum.freeze_step = max(top_k_curriculum.warmup_steps, int(top_k_curriculum.freeze_step))
+    if routing_usage_tracker is None:
+        routing_usage_tracker = RoutingUsageTracker(num_islands=model.num_islands)
 
+    global_step = 0
     for epoch in range(epochs):
         for batch_idx, batch in enumerate(dataloader):
             x, y = batch
             x, y = x.to(device), y.to(device)
+
+            scheduled_top_k = top_k_curriculum.get_top_k(global_step)
+            model.top_k = scheduled_top_k
+            model.router.set_top_k(scheduled_top_k)
+            routing_usage_tracker.resize(model.num_islands)
 
 # Forward pass (targets=y enables specialization routing boost)
             out_dict = model(x, targets=y)
             outputs = out_dict["output"]
             routing_weights = out_dict["routing_weights"]
             entropy = out_dict["entropy"]
+            routing_metrics = routing_usage_tracker.update(routing_weights)
+            scheduled_top_k = top_k_curriculum.get_top_k(global_step)
+
             # DETACH island_embeds immediately: as long as it carries the StackBackward0
-            # graph from model.forward(), any view created from it (indexing, transpose,
-            # mean…) stays in the autograd graph until loss.backward().  deposit_all()
+
             # then does in-place copy_() on the same buffer, incrementing the version
             # counter and corrupting the backward pass (step ~17).  Detaching at source
             # breaks every downstream view cleanly.
@@ -520,6 +656,32 @@ Tuple of (logs, updated_courant).
                 coherence_loss_val = 0.0
             diversity_loss_val = compute_diversity_loss(island_embeds).item()
 
+            # ─── Specialization pressure in strict top-k phase ───────────────
+            # Top-k=1 makes exactly one island responsible per sample. Penalizing
+            # the entropy of the active island logits pushes islands toward
+            # confident class decisions instead of staying uniformly uncertain.
+            island_outputs = out_dict["island_outputs"]  # [batch, islands, classes]
+            active_mask = routing_weights > 0
+            active_logits = island_outputs[active_mask]
+            active_targets = y.repeat_interleave(active_mask.sum(dim=1).clamp(min=1).long())
+            active_probs = active_logits.softmax(dim=-1)
+            active_entropy = -(active_probs * active_probs.clamp_min(1e-8).log()).sum(dim=-1)
+            specialization_loss_val = active_entropy.mean().item()
+            specialization_lambda = 0.20 if scheduled_top_k == 1 else 0.0
+            specialization_loss = active_entropy.mean() * specialization_lambda
+            active_ce = F.cross_entropy(active_logits, active_targets) if active_logits.numel() > 0 else torch.tensor(0.0, device=device)
+            specialization_loss = specialization_loss + active_ce * 0.30
+
+            # Output diversity pressure: if all islands learn identical class
+            # histograms, functional specialization cannot be measured. Penalize
+            # class-wise agreement between islands so each island is pushed to
+            # develop a different predictive bias.
+            island_logits_raw = island_outputs.detach()
+            classwise_diversity = island_logits_raw.var(dim=1, unbiased=False).mean(dim=0)
+            output_diversity_loss_val = float(classwise_diversity.mean().item())
+            output_diversity_lambda = 0.50 if scheduled_top_k == 1 else 0.0
+            output_diversity_loss = -classwise_diversity.mean() * output_diversity_lambda
+
             courant_state = courant.step(
                 entropy=entropy.item(),
                 diversity=diversity_loss_val,
@@ -542,6 +704,14 @@ Tuple of (logs, updated_courant).
                 lambda_diversity=courant_state["lambda_diversity"],
                 lambda_entropy=courant_state["lambda_entropy"],
             )
+            loss = loss + specialization_loss + output_diversity_loss
+            loss_components = {
+                **loss_components,
+                "specialization": specialization_loss_val,
+                "specialization_lambda": specialization_lambda,
+                "output_diversity": output_diversity_loss_val,
+                "output_diversity_lambda": output_diversity_lambda,
+            }
 
             # ─── Backward pass ───────────────────────────────────────────────
             torch.autograd.set_detect_anomaly(True, check_nan=False)
@@ -566,6 +736,7 @@ Tuple of (logs, updated_courant).
                     predicted_class=predicted_class,
                     targets=y,
                     island_embeddings=island_embeds,
+                    island_outputs=out_dict["island_outputs"].detach(),
                 )
 
             # ─── Lifecycle evaluation (POST-backward: no graph corruption) ───
@@ -578,9 +749,15 @@ Tuple of (logs, updated_courant).
             else:
                 coherence_variance = 0.0
 
-            # 2. Check for birth
+            # 2. Check for birth — disabled during exploration and early strict
+            # phase to avoid churn while specialization scores bootstrap.
             should_birth = model.lifecycle.should_spawn(coherence_variance)
-            if should_birth and model.num_islands < model.max_islands:
+            allow_birth = (
+                scheduled_top_k == 1
+                and stable_specialization_batches >= 3
+                and global_step >= top_k_curriculum.warmup_steps + len(dataloader)
+            )
+            if should_birth and allow_birth and model.num_islands < model.max_islands:
                 if num_active_v >= 1:
                     context = get_context_for_spawn(
                         island_embeds[active_mask_v].mean(dim=1),
@@ -595,10 +772,50 @@ Tuple of (logs, updated_courant).
                     "coherence_variance": coherence_variance,
                     "num_islands": model.num_islands,
                 })
+                stable_specialization_batches = 0
 
             # 3. Check for death
             kill_list = model.lifecycle.should_kill()
-            useless = model.specialization.get_useless_islands(min_specialization=0.05)
+            allow_death = (
+                scheduled_top_k == 1
+                and global_step >= top_k_curriculum.warmup_steps + (2 * len(dataloader))
+            )
+            if not allow_death:
+                kill_list = []
+                useless = []
+            else:
+                # Do not kill islands for weak specialization during the exploration
+            # phase. Specialization scores are still forming while k > 1, and
+            # early kills collapse the island population before diversity can
+            # emerge. In strict k=1 phase, preserve diversity until at least two
+            # classes have functional coverage; otherwise pruning can leave only
+            # generic islands and destroy the strict-specialization signal.
+                if scheduled_top_k == 1:
+                    spec_state_before_pruning = model.specialization.get_state_summary()
+                    has_min_coverage = (
+                        int(spec_state_before_pruning.get("spec_coverage", 0)) >= 2
+                        and int(spec_state_before_pruning.get("specialized_island_count", 0)) >= 2
+                    )
+                    if has_min_coverage:
+                        stable_specialization_batches = min(stable_specialization_batches + 1, 10)
+                    elif stable_specialization_batches > 0:
+                        stable_specialization_batches -= 1
+
+                    if (
+                        has_min_coverage
+                        and stable_specialization_batches >= 3
+                        and model.num_islands > model.min_islands + 1
+                    ):
+                        useless = model.specialization.get_useless_islands(min_specialization=0.05)
+                        # Safety guard for long runs: never prune down to the minimum
+                        # island count while specialization coverage is absent. The old
+                        # long-run failure mode was exactly "2 islands + spec_coverage=0".
+                        if model.num_islands <= model.min_islands + 1 and not has_min_coverage:
+                            useless = []
+                    else:
+                        useless = []
+                else:
+                    useless = []
             for uid in useless:
                 if uid not in kill_list and model.num_islands - len(kill_list) > model.min_islands:
                     kill_list.append(uid)
@@ -610,6 +827,8 @@ Tuple of (logs, updated_courant).
                             "event": "death", "killed_island_id": island_id,
                             "num_islands": model.num_islands,
                         })
+                        routing_usage_tracker.resize(model.num_islands)
+                        stable_specialization_batches = 0
 
             # 4. Advance gradient history index (post-backward, for death window)
             model.lifecycle.step_gradient_history()
@@ -626,6 +845,13 @@ Tuple of (logs, updated_courant).
             lifecycle_state = model.lifecycle.get_state_summary()
             spec_state = model.specialization.get_state_summary()
 
+            diagnostic_messages = (
+                _routing_diagnostic_messages(routing_metrics, model.num_islands, scheduled_top_k, global_step)
+                + _specialization_diagnostic_messages(spec_state, global_step)
+                + _lifecycle_diagnostic_messages(lifecycle_state)
+            )
+            qualitative_log = _format_messages(diagnostic_messages)
+
             # ─── Build log entry ─────────────────────────────────────────────
             log_entry = {
                 "epoch": epoch,
@@ -635,10 +861,22 @@ Tuple of (logs, updated_courant).
                 "coherence": coherence_loss_val,
                 "diversity": loss_components["diversity"],
                 "entropy_reg": loss_components["entropy_reg"],
+                "specialization": specialization_loss_val,
+                "specialization_lambda": specialization_lambda,
+                "output_diversity": output_diversity_loss_val,
+                "output_diversity_lambda": output_diversity_lambda,
                 "sparsity": out_dict["sparsity"].item(),
                 "entropy": entropy.item(),
+                "current_top_k": scheduled_top_k,
+                "scheduled_top_k": scheduled_top_k,
+                **routing_metrics,
+                "spec_coverage": spec_state["spec_coverage"],
+                "specialized_island_count": spec_state["specialized_island_count"],
+                "specialization_purity_mean": spec_state["specialization_purity_mean"],
+                "best_class_score_mean": spec_state["best_class_score_mean"],
+                "negative_score_count": spec_state["negative_score_count"],
+                "dominant_score_max": spec_state["dominant_score_max"],
                 "lambda_coherence": courant_state["lambda_coherence"],
-                "lambda_diversity": courant_state["lambda_diversity"],
                 "lambda_entropy": courant_state["lambda_entropy"],
                 "epsilon_mod": courant_state["epsilon_modulation"],
                 "coherence_variance": coherence_variance,
@@ -646,6 +884,8 @@ Tuple of (logs, updated_courant).
                 "ocean_proximity_mean": ocean_stats.get("proximity_mean", 0.0),
                 "spec_mean": spec_state["spec_mean"],
                 "spec_max": spec_state["spec_max"],
+                "spec_std": spec_state["spec_std"],
+                "qualitative_log": qualitative_log,
                 **lifecycle_state,
             }
             logs.append(log_entry)
@@ -665,8 +905,11 @@ Tuple of (logs, updated_courant).
                     f"λ_coh={courant_state['lambda_coherence']:.3f}"
                     f"{event_str}"
                 )
+                if qualitative_log:
+                    print(f"  Diag: {qualitative_log}")
 
             prev_routing_weights = routing_weights.detach()
+            global_step += 1
 
     return logs, courant
 

@@ -60,6 +60,10 @@ class HyperNetworkRouter(nn.Module):
             nn.Parameter(torch.tensor(1.0), requires_grad=False),
         )
 
+    def set_top_k(self, top_k: int) -> None:
+        """Update the active top-k while keeping it valid for the current island count."""
+        self.top_k = max(1, min(int(top_k), max(1, self.num_islands)))
+
     def compute_correlations(
         self, island_states: torch.Tensor, input_repr: torch.Tensor
     ) -> torch.Tensor:

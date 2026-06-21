@@ -23,6 +23,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from archipel.current.courant import Courant
+from archipel.current.topk_curriculum import TopKCurriculum, RoutingUsageTracker
 from archipel.training.loop_lifecycle import ArchipelPhase2, train_loop_lifecycle
 from archipel.training.csv_logger import save_logs_to_csv
 
@@ -86,6 +87,20 @@ def build_dataloader(config: Config, seed: int = 42) -> DataLoader:
     return DataLoader(TensorDataset(x, labels), batch_size=batch_size, shuffle=True, generator=generator)
 
 
+def build_top_k_curriculum(config: Config, model: ArchipelPhase2) -> TopKCurriculum | None:
+    """Build the dynamic top-k curriculum from config."""
+    curriculum_cfg = config.get("top_k_curriculum")
+    if not curriculum_cfg or not curriculum_cfg.get("enabled", False):
+        return None
+    return TopKCurriculum(
+        num_islands=model.num_islands,
+        k_init=int(curriculum_cfg.get("k_init", model.top_k)),
+        k_final=int(curriculum_cfg.get("k_final", model.top_k)),
+        warmup_steps=int(curriculum_cfg.get("warmup_steps", 0)),
+        freeze_step=curriculum_cfg.get("freeze_step"),
+    )
+
+
 def train_from_config(
     config: Config, 
     seed: int = 42, 
@@ -104,6 +119,8 @@ def train_from_config(
     model = build_model(config)
     dataloader = build_dataloader(config, seed=seed)
     courant = Courant(num_islands=model.num_islands)
+    curriculum = build_top_k_curriculum(config, model)
+    routing_tracker = RoutingUsageTracker(num_islands=model.num_islands)
 
     train_cfg = config["training"]
     optimizer = torch.optim.Adam(model.parameters(), lr=float(train_cfg.get("lr", 1e-3)))
@@ -113,9 +130,29 @@ def train_from_config(
 
     if quiet:
         with contextlib.redirect_stdout(io.StringIO()):
-            logs, _ = train_loop_lifecycle(model, dataloader, optimizer, courant, epochs=epochs, device=device, log_every=log_every)
+            logs, _ = train_loop_lifecycle(
+                model,
+                dataloader,
+                optimizer,
+                courant,
+                epochs=epochs,
+                device=device,
+                log_every=log_every,
+                top_k_curriculum=curriculum,
+                routing_usage_tracker=routing_tracker,
+            )
     else:
-        logs, _ = train_loop_lifecycle(model, dataloader, optimizer, courant, epochs=epochs, device=device, log_every=log_every)
+        logs, _ = train_loop_lifecycle(
+            model,
+            dataloader,
+            optimizer,
+            courant,
+            epochs=epochs,
+            device=device,
+            log_every=log_every,
+            top_k_curriculum=curriculum,
+            routing_usage_tracker=routing_tracker,
+        )
 
     checkpoint_dir = Path(str(train_cfg.get("checkpoint_dir", "checkpoints")))
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
