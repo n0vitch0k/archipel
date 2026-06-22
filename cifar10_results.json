@@ -1,0 +1,38 @@
+{
+  "cosine_42": {
+    "accuracy_final": 0.34828,
+    "final_order_parameter": 0.0,
+    "num_births": 0,
+    "num_deaths": 0
+  },
+  "kuramoto_42": {
+    "accuracy_final": 0.61988,
+    "final_order_parameter": 0.9928,
+    "num_births": 0,
+    "num_deaths": 0
+  },
+  "cosine_123": {
+    "accuracy_final": 0.416,
+    "final_order_parameter": 0.0,
+    "num_births": 0,
+    "num_deaths": 0
+  },
+  "kuramoto_123": {
+    "accuracy_final": 0.45186,
+    "final_order_parameter": 0.9986,
+    "num_births": 0,
+    "num_deaths": 0
+  },
+  "cosine_256": {
+    "accuracy_final": 0.42256,
+    "final_order_parameter": 0.0,
+    "num_births": 0,
+    "num_deaths": 0
+  },
+  "kuramoto_256": {
+    "accuracy_final": 0.43756,
+    "final_order_parameter": 0.9958,
+    "num_births": 0,
+    "num_deaths": 0
+  }
+}
